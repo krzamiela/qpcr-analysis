@@ -1,0 +1,222 @@
+---
+title: "qPCR Analysis"
+author: "Kathryn Zamiela"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+params:
+  qubit_file: "data/QUBIT.xlsx"
+  qpcr_file: "data/HaloarchaeaPlate3.csv"
+  output_file: "data/output.csv"
+---
+
+## Usage Instructions
+
+Change the "qubit_file" and "qpcr_file" params at the top of this file to change the input, and "output_file" to change the output file name.
+
+**QUBIT file** expected to have at least the following columns: **Sample**, **Final Concentration (ng/uL)**
+
+**qPCR file** expected to have at least the following columns: **Well**, **Sample**, **Cq**, **Quantity**
+
+### Load libraries
+
+```{r}
+#| label: load-libraries
+#| message: false
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(readr)
+```
+
+### Load files
+
+```{r}
+#| label: load-files
+#| echo: false
+
+qubit <- read_excel(params$qubit_file, sheet = "Sheet1")
+qpcr <- read_csv(params$qpcr_file)
+
+glimpse(qubit)
+glimpse(qpcr)
+```
+
+### Clean data
+
+```{r}
+#| label: clean-data
+#| echo: false
+
+qubit_clean <- qubit %>%
+  select("Sample", "Final Concentration (ng/uL)")
+
+qpcr_clean <- qpcr %>%
+  select("Well", "Sample", "Cq", "Quantity") %>%
+  replace(.=="-", NA) %>%
+  mutate(Sample = toupper(Sample)) %>%
+  mutate(Quantity = as.numeric(Quantity)) %>%
+  mutate(Cq = as.numeric(Cq))
+
+qpcr_clean
+```
+
+### Create standards
+
+```{r}
+#| label: create-standards
+#| echo: false
+
+stds <- qpcr_clean %>%
+  filter(grepl("ST", Sample)) %>%
+  group_by(Sample) %>%
+  summarise(
+    mean_qty_log2 = mean(log2(Quantity), na.rm = TRUE),
+    mean_cq = mean(Cq, na.rm = TRUE)
+  )    
+
+stds
+```
+
+### Plot: Standards, Un-logged
+
+```{r}
+#| label: plot-stds-un-log
+#| echo: false
+
+ggplot(data = stds, mapping = aes(x = mean_cq, y = 2^mean_qty_log2)) +
+  geom_point(color = "red") +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(title = "Quantity vs CQ, Un-Logged",
+       x = "CQ",
+       y = "Quantity") +
+  theme_minimal()
+```
+
+### Plot: Standards, Semi-Log
+
+```{r}
+#| label: plot-stds-semi-log
+#| echo: false
+
+ggplot(data = stds, mapping = aes(x = mean_cq, y = mean_qty_log2)) +
+  geom_point(color = "red") +
+  geom_smooth(method = lm, se = FALSE) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(title = "Quantity vs CQ, Un-Logged",
+       x = "CQ",
+       y = "Quantity") +
+  theme_minimal()
+```
+
+### Generate Model
+
+```{r}
+#| label: generate-model
+#| echo: false
+
+qpcr_model <- lm(mean_qty_log2 ~ mean_cq, data = stds)
+summary(qpcr_model)$coefficients
+```
+
+### Plot: Model
+
+```{r}
+#| label: plot-model
+#| echo: false
+
+ggplot(data = qpcr_model, mapping = aes(x = mean_cq, y = mean_qty_log2)) +
+  geom_point(color = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(title = "Predicted Quantity (Log2) vs CQ",
+       x = "CQ",
+       y = "Quantity") +
+  theme_minimal()
+```
+
+### Data Without Standards
+
+```{r}
+#| label: data-no-stds
+#| echo: false
+
+qpcr_no_std <- qpcr_clean %>%
+  filter(!grepl("ST", Sample) & !grepl("H2O", `Sample`) & !grepl("WATER", `Sample`) & !grepl("NEGATIVE", `Sample`)) %>%
+  group_by(Sample) %>%
+  summarise(mean_cq = mean(Cq),
+            mean_qty_log2 = mean(log2(Quantity)))
+
+qpcr_no_std
+```
+
+### Outliers
+
+```{r}
+#| label: outliers
+#| echo: false
+
+qpcr_no_std <- qpcr_no_std %>%
+  mutate(Outlier = case_when(
+    mean_cq < min(stds$mean_cq) ~ "Under",
+    mean_cq > max(stds$mean_cq) ~ "Over",
+    TRUE ~ NA))
+
+qpcr_no_std %>%
+  filter(!is.na(Outlier))
+
+qpcr_clean %>%
+  filter(is.na(Cq) | is.na(Quantity))
+```
+
+### Predict and Label
+
+```{r}
+#| label: labelled-predictions
+#| echo: false
+
+# interpolate data into model
+predict_model <- predict(qpcr_model, newdata = data.frame(mean_cq = qpcr_no_std$mean_cq))
+
+predict_model
+
+labelled_predictions <- qpcr_no_std %>%
+  filter(!is.na(mean_cq) & !is.na(mean_qty_log2)) %>%
+  mutate(fitted = predict(qpcr_model, newdata = data.frame(mean_cq = mean_cq))) %>%
+  mutate(conc = 2^mean_qty_log2) %>%
+  mutate(fitted_conc = 2^fitted)
+
+labelled_predictions
+
+```
+
+### Plot: Predictions
+
+```{r}
+#| label: plot-predictions
+#| echo: false
+
+ggplot(data = labelled_predictions, mapping = aes(x = fitted_conc, y = 2^mean_qty_log2)) +
+         geom_point(color = "red") +
+  geom_abline(intercept=0, slope=1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(title = "Observed vs Predicted Concentrations",
+       x = "Predicted Concentration",
+       y = "Observed Concentration") +
+  theme_minimal()
+  
+```
+
+### Save
+
+```{r}
+#| label: save-file
+write.csv(labelled_predictions, params$output_file, row.names = FALSE)
+```
